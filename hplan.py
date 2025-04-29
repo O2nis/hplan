@@ -3,6 +3,7 @@ import pandas as pd
 from thefuzz import process, fuzz
 from io import StringIO
 import chardet
+import uuid
 
 # Algorithm options with descriptions
 MATCH_ALGORITHMS = {
@@ -26,7 +27,6 @@ def read_csv(file):
     try:
         return pd.read_csv(file, encoding=encoding)
     except UnicodeDecodeError:
-        # Try UTF-16 if automatic detection fails
         file.seek(0)
         try:
             return pd.read_csv(file, encoding='utf-16')
@@ -34,26 +34,27 @@ def read_csv(file):
             file.seek(0)
             return pd.read_csv(file, encoding='latin1')  # Fallback
 
-def fill_missing_values(df1, df2, threshold=80, algorithm="Token Set", prevent_duplicates=True):
-    """Fill missing values using fuzzy matching on first column, filling second column"""
-    filled_df = df1.copy()
+def fill_missing_values(df1, df2, match_col1, match_col2, data_col2, threshold=80, algorithm="Token Set", prevent_duplicates=True):
+    """Fill missing values using fuzzy matching on selected columns"""
+    filled_df = df1[[match_col1]].copy()  # Start with only the matching column
     scorer = MATCH_ALGORITHMS[algorithm]
     
     # Add result columns
+    filled_df['Filled Data'] = None
     filled_df['Match Score'] = 0
     filled_df['Matched Name'] = ""
     filled_df['Algorithm Used'] = algorithm
     
-    # Create dictionary from df2 using first and second columns
+    # Create dictionary from df2 using selected matching and data columns
     df2_dict = dict(zip(
-        df2.iloc[:, 0],  # First column
-        df2.iloc[:, 1]   # Second column
+        df2[match_col2],
+        df2[data_col2]
     ))
     
     used_matches = set() if prevent_duplicates else None
     
     for index, row in filled_df.iterrows():
-        if pd.isna(row.iloc[1]):  # Check if second column is missing
+        if pd.isna(row.get('Filled Data', True)):  # Check if data needs filling
             available_matches = {k:v for k,v in df2_dict.items() 
                                if not prevent_duplicates or k not in used_matches}
             
@@ -61,14 +62,14 @@ def fill_missing_values(df1, df2, threshold=80, algorithm="Token Set", prevent_d
                 continue
                 
             best_match = process.extractOne(
-                row.iloc[0],  # First column for matching
+                row[match_col1],
                 available_matches.keys(),
                 scorer=scorer
             )
             
             if best_match and best_match[1] >= threshold:
                 match_name, match_score = best_match[0], best_match[1]
-                filled_df.at[index, filled_df.columns[1]] = df2_dict[match_name]  # Fill second column
+                filled_df.at[index, 'Filled Data'] = df2_dict[match_name]
                 filled_df.at[index, 'Match Score'] = match_score
                 filled_df.at[index, 'Matched Name'] = match_name
                 
@@ -78,8 +79,8 @@ def fill_missing_values(df1, df2, threshold=80, algorithm="Token Set", prevent_d
     return filled_df
 
 def main():
-    st.title("🔍 CSV Value Matcher (UTF-16 Supported)")
-    st.markdown("Fill missing values in second column by matching names in first column between CSV files")
+    st.title("🔍 Flexible CSV Value Matcher (UTF-16 Supported)")
+    st.markdown("Fill missing values by matching selected columns between CSV files")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -95,7 +96,32 @@ def main():
         )
     
     if uploaded_file1 and uploaded_file2:
-        with st.expander("Matching Settings", expanded=True):
+        # Read files with encoding detection
+        df1 = read_csv(uploaded_file1)
+        df2 = read_csv(uploaded_file2)
+        
+        with st.expander("Column Selection and Matching Settings", expanded=True):
+            # Column selection for first file
+            match_col1 = st.selectbox(
+                "Select column to match from first file",
+                options=df1.columns,
+                key="match_col1"
+            )
+            
+            # Column selection for second file
+            match_col2 = st.selectbox(
+                "Select column to match from second file",
+                options=df2.columns,
+                key="match_col2"
+            )
+            
+            data_col2 = st.selectbox(
+                "Select column with data to fill from second file",
+                options=df2.columns,
+                key="data_col2"
+            )
+            
+            # Matching settings
             algorithm = st.selectbox(
                 "Matching Algorithm",
                 options=list(MATCH_ALGORITHMS.keys()),
@@ -119,23 +145,17 @@ def main():
             )
         
         try:
-            # Read files with encoding detection
-            df1 = read_csv(uploaded_file1)
-            df2 = read_csv(uploaded_file2)
-            
-            # Validate that files have at least 2 columns
-            if df1.shape[1] < 2 or df2.shape[1] < 2:
-                st.error("Error: Both files must have at least 2 columns")
-                st.stop()
-            
-            # Clean data (first column only)
-            df1.iloc[:, 0] = df1.iloc[:, 0].astype(str).str.lower().str.strip()
-            df2.iloc[:, 0] = df2.iloc[:, 0].astype(str).str.lower().str.strip()
+            # Clean data for selected columns
+            df1[match_col1] = df1[match_col1].astype(str).str.lower().str.strip()
+            df2[match_col2] = df2[match_col2].astype(str).str.lower().str.strip()
             
             # Process data
             with st.spinner("Matching projects..."):
                 result_df = fill_missing_values(
                     df1, df2,
+                    match_col1=match_col1,
+                    match_col2=match_col2,
+                    data_col2=data_col2,
                     threshold=threshold,
                     algorithm=algorithm,
                     prevent_duplicates=prevent_duplicates
